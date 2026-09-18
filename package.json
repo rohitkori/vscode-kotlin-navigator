@@ -1,7 +1,7 @@
 {
   "name": "kotlin-navigator",
   "displayName": "Kotlin Navigator",
-  "description": "Fast, reliable Go to Definition / Find References for Kotlin and Android projects in VS Code and Cursor.",
+  "description": "Go to Definition, Find References and semantic highlighting for Kotlin and Android in VS Code and Cursor. No Gradle sync, no language server, no JVM.",
   "version": "0.1.0",
   "publisher": "local",
   "license": "MIT",
@@ -15,7 +15,13 @@
     "kotlin",
     "android",
     "go to definition",
-    "navigation"
+    "semantic highlighting",
+    "navigation",
+    "jetpack compose",
+    "viewbinding",
+    "gradle",
+    "intellisense",
+    "cursor"
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
@@ -208,17 +214,40 @@
     ]
   },
   "scripts": {
+    "vscode:prepublish": "npm run typecheck && npm test && node esbuild.js --production",
     "build": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc --noEmit",
     "package": "npm run typecheck && npm test && node esbuild.js --production && npx --yes @vscode/vsce package --no-dependencies --allow-missing-repository",
     "test": "esbuild test/index.ts --bundle --platform=node --alias:vscode=./test/vscodeMock.ts --outfile=out/tests.js --log-level=error && node out/tests.js",
-    "bench": "esbuild tools/bench.ts --bundle --platform=node --outfile=out/bench.js --log-level=error && node --max-old-space-size=8192 out/bench.js"
+    "bench": "esbuild tools/bench.ts --bundle --platform=node --outfile=out/bench.js --log-level=error && node --max-old-space-size=8192 out/bench.js",
+    "icon": "node tools/generate-icon.mjs",
+    "publish": "npx --yes @vscode/vsce publish",
+    "publish:openvsx": "npx --yes ovsx publish"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/vscode": "^1.85.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.7.0"
+  },
+  "icon": "icon.png",
+  "pricing": "Free",
+  "galleryBanner": {
+    "color": "#4F5BF0",
+    "theme": "dark"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true,
+      "description": "Kotlin Navigator only reads and parses source files; it never executes project code or build scripts."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "Indexing reads sources and -sources.jar archives directly from disk, which a virtual file system cannot provide."
+    }
   }
 }
