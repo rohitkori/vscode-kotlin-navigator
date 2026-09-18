@@ -3,7 +3,15 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { activate } from '../src/extension';
-import { CancellationTokenNone, MockTextDocument, Position, registry, Uri } from './vscodeMock';
+import {
+  CancellationTokenNone,
+  decodeTokens,
+  MockTextDocument,
+  Position,
+  registry,
+  SemanticTokensLegend,
+  Uri,
+} from './vscodeMock';
 import { assert, assertEqual, suite, test } from './harness';
 
 /** A miniature Android module on disk, so the real file walkers run. */
@@ -16,6 +24,33 @@ function createFixtureProject(): string {
   };
 
   write('app/build.gradle', 'android {\n  compileSdk 34\n}\n');
+  write(
+    'app/src/main/java/com/demo/Colors.kt',
+    `package com.demo
+
+import kotlinx.coroutines.Dispatchers
+
+annotation class Marker
+
+interface Loader {
+    fun load(): String
+}
+
+enum class Mode { FAST, SLOW }
+
+class Painter(private val label: String) : Loader {
+    @Marker
+    var counter: Int = 0
+
+    override fun load(): String = label
+
+    suspend fun fetch(target: Mode, factor: Int): String {
+        val prefix = label
+        return prefix + target.name + factor + Dispatchers
+    }
+}
+`,
+  );
   write(
     'app/src/main/java/com/demo/Repo.kt',
     `package com.demo
@@ -213,6 +248,118 @@ export async function run(): Promise<void> {
       const files = references.map((r: any) => path.basename(r.uri.fsPath));
       assert(files.includes('Repo.kt'), 'declaration included');
       assert(files.includes('MainActivity.kt'), 'usage included');
+    });
+  });
+
+  // --- semantic highlighting ---------------------------------------------
+  const colorsFile = path.join(root, 'app/src/main/java/com/demo/Colors.kt');
+  const colorsDocument = documentFor(colorsFile);
+  const legend = new SemanticTokensLegend(
+    [
+      'namespace', 'class', 'interface', 'enum', 'enumMember', 'typeParameter', 'type',
+      'function', 'method', 'property', 'variable', 'parameter', 'decorator',
+    ],
+    ['declaration', 'definition', 'readonly', 'static', 'abstract', 'async', 'defaultLibrary'],
+  );
+  const raw = registry.semanticTokens[0].provideDocumentSemanticTokens(colorsDocument as any, CancellationTokenNone);
+  const tokens = decodeTokens(raw, legend);
+  const colorsText = colorsDocument.getText();
+  const tokenAt = (needle: string, occurrence = 0) => {
+    const position = positionOf(colorsDocument, needle, occurrence);
+    return tokens.find((t) => t.line === position.line && t.character === position.character);
+  };
+
+  suite('integration: semantic highlighting', () => {
+    test('produces tokens for the whole file', () => {
+      assert(tokens.length > 20, `expected a token stream, got ${tokens.length}`);
+      assert(colorsText.includes('Painter'), 'fixture intact');
+    });
+
+    test('classes, interfaces and enums get distinct types', () => {
+      assertEqual(tokenAt('Painter')?.type, 'class');
+      assertEqual(tokenAt('Loader')?.type, 'interface');
+      assertEqual(tokenAt('Mode')?.type, 'enum');
+    });
+
+    test('a declaration is marked as such, a use is not', () => {
+      assert(tokenAt('Painter')?.modifiers.includes('declaration'), 'declaration modifier on the class name');
+      const useOfMode = tokenAt('Mode', 1);
+      assert(!!useOfMode, 'the parameter type is tokenized');
+      assert(!useOfMode!.modifiers.includes('declaration'), 'a type use is not a declaration');
+    });
+
+    test('methods, properties, parameters and locals are told apart', () => {
+      assertEqual(tokenAt('fetch')?.type, 'method');
+      assertEqual(tokenAt('counter')?.type, 'property');
+      assertEqual(tokenAt('factor')?.type, 'parameter');
+      assertEqual(tokenAt('prefix')?.type, 'variable');
+    });
+
+    test('val bindings are readonly and var bindings are not', () => {
+      assert(tokenAt('prefix')?.modifiers.includes('readonly'), 'val local is readonly');
+      assert(!tokenAt('counter')?.modifiers.includes('readonly'), 'var property is writable');
+    });
+
+    test('suspending functions are marked async', () => {
+      assert(tokenAt('fetch')?.modifiers.includes('async'), 'suspend fun carries the async modifier');
+      assert(!tokenAt('load')?.modifiers.includes('async'), 'a plain fun does not');
+    });
+
+    test('annotation uses are decorators', () => {
+      assertEqual(tokenAt('Marker', 1)?.type, 'decorator');
+      assertEqual(tokenAt('Marker')?.type, 'class', 'the annotation declaration is still a class');
+    });
+
+    test('enum entries are enum members', () => {
+      assertEqual(tokenAt('FAST')?.type, 'enumMember');
+    });
+
+    test('companion and object members are static, parameters never are', () => {
+      assert(tokenAt('counter')?.modifiers.includes('static') === false, 'a class property is not static');
+      assert(!tokenAt('factor')?.modifiers.includes('static'), 'a parameter is never static');
+      assert(!tokenAt('prefix')?.modifiers.includes('static'), 'a local is never static');
+    });
+
+    test('every segment of the package declaration is a namespace', () => {
+      const packageLine = positionOf(colorsDocument, 'com.demo');
+      const segments = tokens.filter((t) => t.line === packageLine.line);
+      assert(segments.length >= 2, 'package segments tokenized');
+      assert(
+        segments.every((t) => t.type === 'namespace'),
+        `expected all namespaces, got ${segments.map((t) => t.type).join(',')}`,
+      );
+    });
+
+    test('package segments of an import are namespaces', () => {
+      const kotlinx = tokenAt('kotlinx');
+      assertEqual(kotlinx?.type, 'namespace');
+    });
+
+    test('keywords are left to the TextMate grammar', () => {
+      const classKeyword = positionOf(colorsDocument, 'class Painter');
+      assert(
+        !tokens.some((t) => t.line === classKeyword.line && t.character === classKeyword.character),
+        'no token emitted over the `class` keyword',
+      );
+    });
+
+    test('the range provider colours only the requested span', () => {
+      const start = positionOf(colorsDocument, 'enum class Mode');
+      const end = positionOf(colorsDocument, 'class Painter');
+      const ranged = decodeTokens(
+        registry.rangeSemanticTokens[0].provideDocumentRangeSemanticTokens(
+          colorsDocument as any,
+          { start, end } as any,
+          CancellationTokenNone,
+        ),
+        legend,
+      );
+      assert(ranged.length > 0, 'range produced tokens');
+      assert(
+        ranged.every((t) => t.line >= start.line && t.line <= end.line),
+        'no tokens outside the requested range',
+      );
+      assert(ranged.length < tokens.length, 'range is a subset of the document');
     });
   });
 

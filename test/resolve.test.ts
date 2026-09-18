@@ -276,6 +276,37 @@ fun go(): ${CURSOR}Other? = null
       assertEqual(workspace.resolveAt('a/Use.kt', marked)[0]?.decl.fqName, 'a.Other');
     });
 
+    test('a parameter stays in scope across an expression body with a trailing lambda', () => {
+      const workspace = new TestWorkspace();
+      const marked = `package a
+fun run(block: () -> Unit) {}
+suspend fun load(agentId: Long): String =
+    run {
+        fetch(${CURSOR}agentId)
+    }
+`;
+      workspace.add('a/Expr.kt', marked);
+      const top = workspace.resolveAt('a/Expr.kt', marked)[0];
+      assertEqual(top?.decl.name, 'agentId');
+      assertEqual(top?.decl.kind, 'parameter');
+    });
+
+    test('`it` never resolves to an unrelated symbol that shares the name', () => {
+      const workspace = new TestWorkspace();
+      workspace.add('a/Stray.kt', 'package other\nval it = 3');
+      const marked = `package a
+fun go(values: List<String>) {
+    values.forEach { println(${CURSOR}it) }
+}
+`;
+      workspace.add('a/It.kt', marked);
+      const results = workspace.resolveAt('a/It.kt', marked);
+      assert(
+        results.every((c) => c.decl.file !== 'a/Stray.kt'),
+        'the implicit lambda parameter must not resolve to a stray top-level `it`',
+      );
+    });
+
     test('prefers the workspace declaration over a generated one', () => {
       const workspace = new TestWorkspace();
       workspace.add('a/Thing.kt', 'package a\nclass Thing');

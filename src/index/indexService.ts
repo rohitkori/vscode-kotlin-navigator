@@ -2,9 +2,14 @@ import { Declaration, ParsedFile, TYPE_KINDS } from '../parser/types';
 import { LibraryIndex, LibrarySource } from './libraryIndex';
 import { Origin, SymbolIndex } from './symbolIndex';
 
+export interface ContainerTraits {
+  isType: boolean;
+  isObject: boolean;
+}
+
 const MAX_PARSED_LIBRARY_FILES = 12000;
 /** Upper bound on files parsed when a whole package is pulled in on demand. */
-const MAX_FILES_PER_PACKAGE = 300;
+const MAX_FILES_PER_PACKAGE = 800;
 /** Upper bound when widening to a whole package sub-tree. */
 const MAX_FILES_PER_PACKAGE_TREE = 1500;
 
@@ -21,13 +26,17 @@ export class IndexService {
   private readonly parsedLibraryQueue: string[] = [];
   /** Library packages already pulled in wholesale. */
   private readonly parsedPackages = new Set<string>();
+  /** Memo for `isTypeContainer`, which highlighting asks for constantly. */
+  private readonly typeContainerCache = new Map<string, ContainerTraits>();
 
   setWorkspaceFile(parsed: ParsedFile, origin: Origin, version: number): void {
     this.symbols.setFile(parsed, origin, version);
+    this.typeContainerCache.clear();
   }
 
   removeFile(file: string): void {
     this.symbols.deleteFile(file);
+    this.typeContainerCache.clear();
   }
 
   getParsed(file: string): ParsedFile | undefined {
@@ -183,6 +192,30 @@ export class IndexService {
 
   isTypeDeclaration(decl: Declaration): boolean {
     return TYPE_KINDS.has(decl.kind);
+  }
+
+  /**
+   * What kind of thing a container is.
+   *
+   * `isType` decides whether a member is a method/property or a top-level
+   * function/variable; `isObject` decides whether it is effectively static,
+   * since everything in an `object` or `companion object` is.
+   */
+  containerTraits(fqName: string): ContainerTraits {
+    const cached = this.typeContainerCache.get(fqName);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const decls = this.symbols.byFq(fqName);
+    const traits: ContainerTraits = {
+      isType: decls.some((d) => TYPE_KINDS.has(d.kind)),
+      isObject: decls.some((d) => d.kind === 'object' || d.isCompanion === true),
+    };
+    if (this.typeContainerCache.size > 5000) {
+      this.typeContainerCache.clear();
+    }
+    this.typeContainerCache.set(fqName, traits);
+    return traits;
   }
 
   stats(): string {

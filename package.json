@@ -128,9 +128,84 @@
           "type": "boolean",
           "default": false,
           "description": "Log detailed resolution steps to the Kotlin Navigator output channel."
+        },
+        "kotlinNavigator.semanticHighlighting": {
+          "type": "boolean",
+          "default": true,
+          "description": "Colour identifiers by what they resolve to - classes, interfaces, methods, properties, parameters and locals - instead of leaving them all one colour. Suspending functions are marked async and `val` bindings readonly."
         }
       }
-    }
+    },
+    "configurationDefaults": {
+      "[kotlin]": {
+        "editor.semanticHighlighting.enabled": true
+      }
+    },
+    "semanticTokenScopes": [
+      {
+        "language": "kotlin",
+        "scopes": {
+          "namespace": [
+            "entity.name.namespace",
+            "storage.modifier.package.kotlin"
+          ],
+          "class": [
+            "entity.name.type.class.kotlin",
+            "entity.name.type.class",
+            "entity.name.type"
+          ],
+          "interface": [
+            "entity.name.type.interface.kotlin",
+            "entity.name.type.interface",
+            "entity.name.type"
+          ],
+          "enum": [
+            "entity.name.type.enum.kotlin",
+            "entity.name.type.enum",
+            "entity.name.type"
+          ],
+          "enumMember": [
+            "variable.other.enummember",
+            "constant.other.enum",
+            "constant.language"
+          ],
+          "typeParameter": [
+            "entity.name.type.parameter",
+            "entity.name.type"
+          ],
+          "type": [
+            "entity.name.type.alias",
+            "entity.name.type"
+          ],
+          "function": [
+            "entity.name.function.kotlin",
+            "entity.name.function"
+          ],
+          "method": [
+            "entity.name.function.member.kotlin",
+            "entity.name.function.member",
+            "entity.name.function"
+          ],
+          "property": [
+            "variable.other.property.kotlin",
+            "variable.other.property"
+          ],
+          "variable": [
+            "variable.other.readwrite.kotlin",
+            "variable.other.readwrite"
+          ],
+          "parameter": [
+            "variable.parameter.kotlin",
+            "variable.parameter"
+          ],
+          "decorator": [
+            "entity.name.function.decorator",
+            "meta.decorator",
+            "storage.type.annotation.kotlin"
+          ]
+        }
+      }
+    ]
   },
   "scripts": {
     "build": "node esbuild.js",

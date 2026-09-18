@@ -23,6 +23,12 @@ export interface LibrarySource {
   filePath?: string;
   /** Human-readable origin, shown in the picker when a name is ambiguous. */
   artifact: string;
+  /**
+   * True when this archive files its sources at paths that mirror their
+   * packages, which nearly all of them do. For those, a package lookup is
+   * authoritative and the sub-tree fallback would only waste work.
+   */
+  pathsMirrorPackages: boolean;
 }
 
 export interface LibraryRoot {
@@ -134,7 +140,8 @@ export class LibraryIndex {
     if (sourceEntries.length === 0) {
       return;
     }
-    const basePackage = this.detectBasePackage(jarPath, sourceEntries);
+    const layout = this.detectLayout(jarPath, sourceEntries);
+    const basePackage = layout.basePackage;
 
     let added = false;
     for (const entry of sourceEntries) {
@@ -152,6 +159,7 @@ export class LibraryIndex {
         jarPath,
         entry,
         artifact,
+        pathsMirrorPackages: layout.pathsMirrorPackages,
       };
       this.register(source);
       added = true;
@@ -163,47 +171,67 @@ export class LibraryIndex {
   }
 
   /**
-   * Works out the package prefix that the entry paths omit.
+   * Works out two things about an archive, from a handful of sampled files.
    *
-   * Multiplatform artifacts publish sources under a source-set root
-   * (`commonMain/`, `jvmMain/`, ...), and some - kotlinx.coroutines being the
-   * notable one - drop the package directories entirely, so
+   * The first is the package prefix that entry paths omit: multiplatform
+   * artifacts publish under a source-set root, and some - kotlinx.coroutines
+   * being the notable one - drop the package directories entirely, so
    * `jvmMain/flow/Flow.kt` really holds `package kotlinx.coroutines.flow`.
-   * Reading the `package` line out of one file recovers the missing prefix for
-   * the whole archive at the cost of a single inflate.
+   *
+   * The second is whether paths mirror packages once that prefix is applied.
+   * Almost always they do, and knowing so lets a package lookup be treated as
+   * authoritative. The Kotlin standard library is the notable exception: it
+   * files `kotlin.let` under `kotlin/util/Standard.kt`, so finding it means
+   * widening the search to the whole sub-tree.
    */
-  private detectBasePackage(jarPath: string, entries: ZipEntry[]): string {
-    const samples = pickSamples(entries, 2);
-    let agreed: string | undefined;
+  private detectLayout(jarPath: string, entries: ZipEntry[]): { basePackage: string; pathsMirrorPackages: boolean } {
+    const samples = pickSamples(entries, 4);
+    const bases: string[] = [];
+    let mismatches = 0;
+    let sampled = 0;
+
     for (const entry of samples) {
       let declared: string | undefined;
       try {
         declared = readPackageDeclaration(readZipEntry(jarPath, entry));
       } catch {
-        return '';
+        return { basePackage: '', pathsMirrorPackages: false };
       }
       if (declared === undefined) {
         continue;
       }
-      const { dirs } = splitEntryPath(entry.name);
-      const suffix = dirs.join('.');
-      let base: string;
+      sampled++;
+      const suffix = splitEntryPath(entry.name).dirs.join('.');
       if (suffix.length === 0) {
-        base = declared;
+        bases.push(declared);
       } else if (declared === suffix) {
-        base = '';
+        bases.push('');
       } else if (declared.endsWith(`.${suffix}`)) {
-        base = declared.substring(0, declared.length - suffix.length - 1);
+        bases.push(declared.substring(0, declared.length - suffix.length - 1));
       } else {
-        return '';
-      }
-      if (agreed === undefined) {
-        agreed = base;
-      } else if (agreed !== base) {
-        return '';
+        // This file's directory is not its package. One such file does not mean
+        // the prefix is wrong - kotlinx.coroutines files `flow/terminal/Reduce.kt`
+        // under `kotlinx.coroutines.flow` - it means the archive needs the
+        // sub-tree fallback to be searched exhaustively.
+        mismatches++;
       }
     }
-    return agreed ?? '';
+    if (sampled === 0) {
+      return { basePackage: '', pathsMirrorPackages: false };
+    }
+
+    const counts = new Map<string, number>();
+    let basePackage = '';
+    let best = 0;
+    for (const base of bases) {
+      const next = (counts.get(base) ?? 0) + 1;
+      counts.set(base, next);
+      if (next > best) {
+        best = next;
+        basePackage = base;
+      }
+    }
+    return { basePackage, pathsMirrorPackages: mismatches === 0 && best === sampled };
   }
 
   indexSourceDirectory(dir: string, label: string): void {
@@ -222,6 +250,8 @@ export class LibraryIndex {
         language: file.endsWith('.kt') ? 'kotlin' : 'java',
         filePath: file,
         artifact: label,
+        // A plain source tree such as the Android SDK's always mirrors packages.
+        pathsMirrorPackages: true,
       });
       this.entryCount++;
     }
@@ -314,7 +344,7 @@ export class LibraryIndex {
    */
   lookupPackageTree(packageName: string, limit: number): LibrarySource[] {
     const packages = this.packagesSorted();
-    let low = lowerBound(packages, packageName);
+    const low = lowerBound(packages, packageName);
     const upper = `${packageName}.\uffff`;
     const out: LibrarySource[] = [];
     for (let i = low; i < packages.length && packages[i] <= upper; i++) {
@@ -323,7 +353,10 @@ export class LibraryIndex {
         continue;
       }
       for (const source of this.byPackage.get(pkg) ?? []) {
-        if (source.language === 'kotlin') {
+        // Skip archives whose paths already mirror their packages: if the
+        // symbol were in this tree, the exact package lookup would have found
+        // it, so parsing hundreds more files can only waste time.
+        if (source.language === 'kotlin' && !source.pathsMirrorPackages) {
           out.push(source);
         }
       }

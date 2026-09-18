@@ -9,8 +9,14 @@ import { ResourceIndex } from './android/resourceIndex';
 import { readFileSafe, statSafe } from './util/fsWalk';
 import { log, logError } from './util/log';
 
-/** Packages worth having ready before the first click. */
+/** Packages worth having ready before the first click, whatever the project. */
 const WARM_PACKAGES = ['kotlin', 'kotlin.collections', 'kotlin.text', 'kotlinx.coroutines'];
+
+/** How many of the workspace's most-imported packages to pre-parse. */
+const WARM_IMPORTED_PACKAGES = 60;
+
+/** Time budget for warm-up; it is a nicety, not a correctness requirement. */
+const WARM_BUDGET_MS = 6000;
 
 const YIELD_EVERY = 40;
 
@@ -104,15 +110,33 @@ export class Indexer {
           if (cancelled()) {
             return;
           }
+          // Parsing a library package happens on first use, which would
+          // otherwise land on whoever opens the first file - as a pause before
+          // the syntax colours appear. Doing it here moves that cost into
+          // start-up, where nothing is waiting on it.
           progress.report({ message: 'warming up' });
           await yieldToHost();
-          for (const packageName of WARM_PACKAGES) {
-            if (cancelled()) {
-              return;
+          const warmStarted = Date.now();
+          let warmed = 0;
+          for (const packageName of [...WARM_PACKAGES, ...this.mostImportedPackages(WARM_IMPORTED_PACKAGES)]) {
+            if (cancelled() || Date.now() - warmStarted > WARM_BUDGET_MS) {
+              break;
             }
-            this.service.ensurePackageParsed(packageName);
+            if (this.service.ensurePackageParsed(packageName)) {
+              warmed++;
+            }
+            if (warmed % 4 === 0) {
+              await yieldToHost();
+            }
+          }
+          // The Kotlin standard library files its sources by concern rather than
+          // by package, so reaching `kotlin.let` means widening to the sub-tree.
+          // Every Kotlin file needs it, so pay for it here, once.
+          if (!cancelled()) {
+            this.service.ensurePackageTreeParsed('kotlin');
             await yieldToHost();
           }
+          log(`warmed ${warmed} library packages in ${Date.now() - warmStarted}ms`);
           log(`index ready in ${Date.now() - started}ms`);
         },
       );
@@ -155,6 +179,29 @@ export class Indexer {
       }
     }
     this.service.libraries.markReady();
+  }
+
+  /**
+   * Packages the workspace imports from, most used first. A project's own
+   * dependencies are exactly the library code its developers navigate into.
+   */
+  private mostImportedPackages(limit: number): string[] {
+    const counts = new Map<string, number>();
+    for (const indexed of this.service.symbols.allFiles()) {
+      if (indexed.origin === 'library') {
+        continue;
+      }
+      for (const entry of indexed.parsed.imports) {
+        const packageName = entry.isStar ? entry.fqName : entry.fqName.substring(0, entry.fqName.lastIndexOf('.'));
+        if (packageName) {
+          counts.set(packageName, (counts.get(packageName) ?? 0) + 1);
+        }
+      }
+    }
+    return [...counts]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, limit)
+      .map(([packageName]) => packageName);
   }
 
   /** Re-index a single file, e.g. after it was saved or created. */

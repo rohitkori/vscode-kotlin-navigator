@@ -167,6 +167,58 @@ export class MockTextDocument {
   }
 }
 
+export class SemanticTokensLegend {
+  constructor(readonly tokenTypes: string[], readonly tokenModifiers: string[]) {}
+}
+
+export class SemanticTokens {
+  constructor(readonly data: Uint32Array) {}
+}
+
+/** Mirrors the real delta encoding so tests decode exactly what the editor sees. */
+export class SemanticTokensBuilder {
+  private readonly values: number[] = [];
+  private lastLine = 0;
+  private lastChar = 0;
+  constructor(readonly legend?: SemanticTokensLegend) {}
+  push(line: number, char: number, length: number, type: number, modifiers: number): void {
+    const deltaLine = line - this.lastLine;
+    const deltaChar = deltaLine === 0 ? char - this.lastChar : char;
+    this.values.push(deltaLine, deltaChar, length, type, modifiers);
+    this.lastLine = line;
+    this.lastChar = char;
+  }
+  build(): SemanticTokens {
+    return new SemanticTokens(new Uint32Array(this.values));
+  }
+}
+
+/** Decodes a token stream back into absolute positions for assertions. */
+export function decodeTokens(
+  tokens: SemanticTokens,
+  legend: SemanticTokensLegend,
+): Array<{ line: number; character: number; length: number; type: string; modifiers: string[] }> {
+  const out = [];
+  let line = 0;
+  let character = 0;
+  for (let i = 0; i < tokens.data.length; i += 5) {
+    const deltaLine = tokens.data[i];
+    const deltaChar = tokens.data[i + 1];
+    line += deltaLine;
+    character = deltaLine === 0 ? character + deltaChar : deltaChar;
+    const modifierBits = tokens.data[i + 4];
+    const modifiers = legend.tokenModifiers.filter((_m, index) => (modifierBits & (1 << index)) !== 0);
+    out.push({
+      line,
+      character,
+      length: tokens.data[i + 2],
+      type: legend.tokenTypes[tokens.data[i + 3]],
+      modifiers,
+    });
+  }
+  return out;
+}
+
 // --- captured registrations ------------------------------------------------
 
 export const registry = {
@@ -178,6 +230,8 @@ export const registry = {
   documentSymbol: [] as any[],
   workspaceSymbol: [] as any[],
   hover: [] as any[],
+  semanticTokens: [] as any[],
+  rangeSemanticTokens: [] as any[],
   contentProviders: new Map<string, any>(),
   commands: new Map<string, (...args: any[]) => any>(),
   configuration: {} as Record<string, unknown>,
@@ -191,6 +245,8 @@ export const registry = {
     this.documentSymbol = [];
     this.workspaceSymbol = [];
     this.hover = [];
+    this.semanticTokens = [];
+    this.rangeSemanticTokens = [];
     this.contentProviders.clear();
     this.commands.clear();
   },
@@ -227,6 +283,14 @@ export const languages = {
   },
   registerHoverProvider(_s: any, p: any) {
     registry.hover.push(p);
+    return { dispose() {} };
+  },
+  registerDocumentSemanticTokensProvider(_s: any, p: any, _legend: any) {
+    registry.semanticTokens.push(p);
+    return { dispose() {} };
+  },
+  registerDocumentRangeSemanticTokensProvider(_s: any, p: any, _legend: any) {
+    registry.rangeSemanticTokens.push(p);
     return { dispose() {} };
   },
 };

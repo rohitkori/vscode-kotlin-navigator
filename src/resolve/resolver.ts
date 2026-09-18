@@ -36,10 +36,24 @@ export interface ResolveInput {
 }
 
 interface Scored {
-  decls: Declaration[];
+  decls: readonly Declaration[];
   score: number;
   reason: string;
 }
+
+/** One lazily evaluated lookup strategy in `resolveHead`. */
+interface Branch {
+  /** Highest score this branch can produce, used to decide when to stop. */
+  max: number;
+  run: () => Scored[];
+}
+
+/**
+ * Most that origin and kind can add to a branch's base score in `rank`.
+ * A branch whose ceiling is more than this below the best hit cannot win, so
+ * it never has to run.
+ */
+const MAX_RANK_BONUS = 4;
 
 export class Resolver {
   constructor(private readonly index: IndexService) {}
@@ -53,6 +67,11 @@ export class Resolver {
     if (!chain) {
       return [];
     }
+    return this.resolveChain(input, chain);
+  }
+
+  /** Resolves a reference whose chain has already been extracted. */
+  resolveChain(input: ResolveInput, chain: ReferenceChain): Candidate[] {
     trace(
       `reference ${chain.kind} [${chain.segments.map((s) => s.name).join('.')}] target=${chain.segments[chain.targetIndex]?.name}`,
     );
@@ -241,42 +260,124 @@ export class Resolver {
       return decls.length > 0 ? [{ decls, score: 100, reason: 'super' }] : [];
     }
 
-    // 1. Locals and parameters of the enclosing function.
-    const locals = this.localsInScope(parsed, offset, name);
-    if (locals.length > 0) {
-      out.push({ decls: locals, score: 100, reason: 'local declaration' });
+    // `it` is the implicit lambda parameter, which is not modelled. Letting it
+    // fall through to a global name match would point at some unrelated symbol
+    // that merely shares the name.
+    if (name === 'it') {
+      const locals = this.localsInScope(parsed, offset, name);
+      return locals.length > 0 ? [{ decls: locals, score: 100, reason: 'local declaration' }] : [];
     }
 
-    // 2. The receiver of an enclosing extension declaration. Inside
-    //    `fun Fragment.show() { requireActivity() }` the unqualified call is a
-    //    member of Fragment, which no amount of lexical scope walking finds.
-    for (const receiverType of this.enclosingReceiverTypes(parsed, offset)) {
-      const members = this.membersOfType(receiverType, name, new Set(), 0);
-      if (members.length > 0) {
-        out.push({ decls: members, score: 96, reason: 'member of extension receiver' });
+    // The branches below are in descending order of confidence. Evaluating one
+    // can mean parsing library sources, so each is a thunk and the loop stops
+    // as soon as no remaining branch could beat what has already been found.
+    const branches: Branch[] = [
+      {
+        max: 100,
+        run: () => {
+          const locals = this.localsInScope(parsed, offset, name);
+          return locals.length > 0 ? [{ decls: locals, score: 100, reason: 'local declaration' }] : [];
+        },
+      },
+      {
+        // The receiver of an enclosing extension declaration. Inside
+        // `fun Fragment.show() { requireActivity() }` the unqualified call is a
+        // member of Fragment, which no lexical scope walk would ever find.
+        max: 96,
+        run: () => {
+          for (const receiverType of this.enclosingReceiverTypes(parsed, offset)) {
+            const members = this.membersOfType(receiverType, name, new Set(), 0);
+            if (members.length > 0) {
+              return [{ decls: members, score: 96, reason: 'member of extension receiver' }];
+            }
+          }
+          return [];
+        },
+      },
+      {
+        max: 95,
+        run: () => {
+          const enclosingTypes = this.enclosingTypes(parsed, offset);
+          for (let i = 0; i < enclosingTypes.length; i++) {
+            const members = this.membersOfType(enclosingTypes[i], name, new Set(), 0);
+            if (members.length > 0) {
+              return [{ decls: members, score: 95 - i, reason: 'member of enclosing class' }];
+            }
+          }
+          return [];
+        },
+      },
+      {
+        max: 92,
+        run: () => {
+          const sameFile = parsed.topLevel.map((i) => parsed.declarations[i]).filter((d) => d.name === name);
+          return sameFile.length > 0 ? [{ decls: sameFile, score: 92, reason: 'top level in this file' }] : [];
+        },
+      },
+      { max: 91, run: () => this.resolveViaImports(name, parsed) },
+      { max: 85, run: () => this.resolveInSamePackage(name, parsed) },
+      {
+        max: 80,
+        run: () => {
+          const results: Scored[] = [];
+          for (const entry of parsed.imports) {
+            if (!entry.isStar) {
+              continue;
+            }
+            const decls = this.index.findByFq(`${entry.fqName}.${name}`);
+            if (decls.length > 0) {
+              results.push({ decls, score: 80, reason: `import ${entry.fqName}.*` });
+            }
+          }
+          return results;
+        },
+      },
+      {
+        max: 60,
+        run: () => {
+          const results: Scored[] = [];
+          for (const pkg of DEFAULT_IMPORTS) {
+            const decls = this.index.findByFq(`${pkg}.${name}`);
+            if (decls.length > 0) {
+              results.push({ decls, score: 60, reason: `default import ${pkg}` });
+            }
+          }
+          return results;
+        },
+      },
+      {
+        max: 45,
+        run: () => {
+          const global = this.index.findBySimple(name).filter((d) => !d.isLocal);
+          return global.length > 0 ? [{ decls: global, score: 45, reason: 'name match in workspace' }] : [];
+        },
+      },
+      {
+        max: 35,
+        run: () => {
+          const lib = this.index.findLibraryBySimple(name, 8);
+          return lib.length > 0 ? [{ decls: lib, score: 35, reason: 'name match in libraries' }] : [];
+        },
+      },
+    ];
+
+    let best = Number.NEGATIVE_INFINITY;
+    for (const branch of branches) {
+      if (best >= branch.max + MAX_RANK_BONUS) {
         break;
       }
-    }
-
-    // 3. Members of the enclosing types, innermost first (inherited included).
-    const enclosingTypes = this.enclosingTypes(parsed, offset);
-    for (let i = 0; i < enclosingTypes.length; i++) {
-      const members = this.membersOfType(enclosingTypes[i], name, new Set(), 0);
-      if (members.length > 0) {
-        out.push({ decls: members, score: 95 - i, reason: 'member of enclosing class' });
-        break;
+      const results = branch.run();
+      for (const result of results) {
+        out.push(result);
+        best = Math.max(best, result.score);
       }
     }
+    return out;
+  }
 
-    // 4. Top-level declarations in the same file.
-    const sameFile = parsed.topLevel
-      .map((i) => parsed.declarations[i])
-      .filter((d) => d.name === name);
-    if (sameFile.length > 0) {
-      out.push({ decls: sameFile, score: 92, reason: 'top level in this file' });
-    }
-
-    // 5. Explicit imports, aliases first.
+  /** Explicit (non-star) imports, aliases first. */
+  private resolveViaImports(name: string, parsed: ParsedFile): Scored[] {
+    const out: Scored[] = [];
     for (const entry of parsed.imports) {
       if (entry.isStar) {
         continue;
@@ -287,75 +388,47 @@ export class Resolver {
         if (decls.length > 0) {
           out.push({ decls, score: 91, reason: `import alias ${entry.fqName}` });
         }
-      } else if (!entry.alias && importedSimple === name) {
-        const decls = this.index.findByFq(entry.fqName);
-        if (decls.length > 0) {
-          out.push({ decls, score: 90, reason: `import ${entry.fqName}` });
-        } else {
-          // Imported but not indexed: still the strongest signal we have about
-          // which package the name lives in.
-          const lib = this.index.libraries.lookupFq(entry.fqName);
-          if (lib) {
-            const parsedLib = this.index.ensureLibraryParsed(lib);
-            const match = parsedLib?.declarations.filter((d) => !d.isLocal && d.name === name) ?? [];
-            if (match.length > 0) {
-              out.push({ decls: match, score: 88, reason: `import ${entry.fqName}` });
-            }
-          }
+        continue;
+      }
+      if (entry.alias || importedSimple !== name) {
+        continue;
+      }
+      const decls = this.index.findByFq(entry.fqName);
+      if (decls.length > 0) {
+        out.push({ decls, score: 90, reason: `import ${entry.fqName}` });
+        continue;
+      }
+      // Imported but not indexed under that name: the import is still the
+      // strongest signal we have about which file the name lives in.
+      const lib = this.index.libraries.lookupFq(entry.fqName);
+      if (lib) {
+        const parsedLib = this.index.ensureLibraryParsed(lib);
+        const match = parsedLib?.declarations.filter((d) => !d.isLocal && d.name === name) ?? [];
+        if (match.length > 0) {
+          out.push({ decls: match, score: 88, reason: `import ${entry.fqName}` });
         }
       }
-    }
-
-    // 6. Same package.
-    if (parsed.packageName) {
-      const samePackage = this.index.symbols
-        .topLevelInPackage(parsed.packageName)
-        .filter((d) => d.name === name && d.file !== parsed.file);
-      if (samePackage.length > 0) {
-        out.push({ decls: [...samePackage], score: 85, reason: 'same package' });
-      } else {
-        const lib = this.index.libraries.lookupInPackage(parsed.packageName, name);
-        if (lib) {
-          const decls = this.index.findByFq(`${parsed.packageName}.${name}`);
-          if (decls.length > 0) {
-            out.push({ decls, score: 84, reason: 'same package' });
-          }
-        }
-      }
-    }
-
-    // 7. Star imports, then Kotlin's implicit default imports.
-    const starPackages = parsed.imports.filter((e) => e.isStar).map((e) => e.fqName);
-    for (const pkg of starPackages) {
-      const decls = this.index.findByFq(`${pkg}.${name}`);
-      if (decls.length > 0) {
-        out.push({ decls, score: 80, reason: `import ${pkg}.*` });
-      }
-    }
-    for (const pkg of DEFAULT_IMPORTS) {
-      const decls = this.index.findByFq(`${pkg}.${name}`);
-      if (decls.length > 0) {
-        out.push({ decls, score: 60, reason: `default import ${pkg}` });
-      }
-    }
-
-    if (out.length > 0) {
-      return out;
-    }
-
-    // 8. Anything in the workspace with this name.
-    const global = this.index.findBySimple(name).filter((d) => !d.isLocal);
-    if (global.length > 0) {
-      out.push({ decls: global, score: 45, reason: 'name match in workspace' });
-      return out;
-    }
-
-    // 9. Anything in the libraries with this name.
-    const lib = this.index.findLibraryBySimple(name, 8);
-    if (lib.length > 0) {
-      out.push({ decls: lib, score: 35, reason: 'name match in libraries' });
     }
     return out;
+  }
+
+  private resolveInSamePackage(name: string, parsed: ParsedFile): Scored[] {
+    if (!parsed.packageName) {
+      return [];
+    }
+    const samePackage = this.index.symbols
+      .topLevelInPackage(parsed.packageName)
+      .filter((d) => d.name === name && d.file !== parsed.file);
+    if (samePackage.length > 0) {
+      return [{ decls: [...samePackage], score: 85, reason: 'same package' }];
+    }
+    if (this.index.libraries.lookupInPackage(parsed.packageName, name)) {
+      const decls = this.index.findByFq(`${parsed.packageName}.${name}`);
+      if (decls.length > 0) {
+        return [{ decls, score: 84, reason: 'same package' }];
+      }
+    }
+    return [];
   }
 
   /** Resolves `segments[0..upTo]`, returning the declarations the chain denotes. */

@@ -9,6 +9,7 @@ export interface NavigatorConfig {
   excludeGlobs: string[];
   indexGeneratedSources: boolean;
   androidResources: boolean;
+  semanticHighlighting: boolean;
   maxResults: number;
   enableHover: boolean;
   trace: boolean;
@@ -25,6 +26,7 @@ export function readConfig(): NavigatorConfig {
     excludeGlobs: section.get('excludeGlobs', []),
     indexGeneratedSources: section.get('indexGeneratedSources', true),
     androidResources: section.get('androidResources', true),
+    semanticHighlighting: section.get('semanticHighlighting', true),
     maxResults: section.get('maxResults', 12),
     enableHover: section.get('enableHover', true),
     trace: section.get('trace', false),

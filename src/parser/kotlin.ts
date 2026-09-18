@@ -256,7 +256,7 @@ interface DeclResult {
 const LAMBDA_ARROW_LOOKAHEAD = 600;
 
 /** Cap on how far an expression-bodied declaration is followed. */
-const MAX_EXPRESSION_BODY = 2000;
+const MAX_EXPRESSION_BODY = 20000;
 const EXPRESSION_BODY_STOPS = new Set<string>();
 
 /**
@@ -592,7 +592,7 @@ function parseProperty(state: ParseState, keyword: IdentToken, start: number, mo
           nameOffset: tok.start,
           nameLength: tok.end - tok.start,
           startOffset: tok.start,
-          modifiers,
+          modifiers: [...modifiers, keyword.name],
         });
         state.decls[idx].endOffset = tok.end;
         state.decls[idx].signature = `${keyword.name} ${tok.name}`;
@@ -621,7 +621,8 @@ function parseProperty(state: ParseState, keyword: IdentToken, start: number, mo
     nameOffset: callable.name.start,
     nameLength: callable.name.end - callable.name.start,
     startOffset: start,
-    modifiers,
+    // `val`/`var` is kept so highlighting can mark immutable bindings readonly.
+    modifiers: [...modifiers, keyword.name],
     receiverType: callable.receiver,
     typeText,
   });
@@ -801,6 +802,7 @@ function parseParameters(state: ParseState, start: number, end: number, ownerInd
       }
       if (tok.name === 'val' || tok.name === 'var') {
         isProperty = true;
+        modifiers.push(tok.name);
         i = skipWhitespace(m, tok.end);
         continue;
       }
@@ -1132,6 +1134,7 @@ function readUntil(masked: string, i: number, stops: Set<string>, hardEnd?: numb
   let depthParen = 0;
   let depthAngle = 0;
   let depthBracket = 0;
+  let depthBrace = 0;
   let j = i;
   while (j < limit) {
     const c = masked[j];
@@ -1155,7 +1158,14 @@ function readUntil(masked: string, i: number, stops: Set<string>, hardEnd?: numb
       if (masked[j - 1] !== '-' && depthAngle > 0) {
         depthAngle--;
       }
-    } else if (depthParen === 0 && depthAngle === 0 && depthBracket === 0) {
+    } else if (c === '{' && !stops.has('{') && depthParen === 0 && depthAngle === 0 && depthBracket === 0) {
+      // A trailing lambda is part of the expression: an expression body such as
+      // `= withContext(IO) { ... }` runs to the matching brace, and the
+      // parameters stay in scope across all of it.
+      depthBrace++;
+    } else if (c === '}' && depthBrace > 0) {
+      depthBrace--;
+    } else if (depthParen === 0 && depthAngle === 0 && depthBracket === 0 && depthBrace === 0) {
       if (stops.has(c)) {
         break;
       }
@@ -1164,7 +1174,11 @@ function readUntil(masked: string, i: number, stops: Set<string>, hardEnd?: numb
         const before = lastNonSpace(masked, i, j);
         const after = firstNonSpace(masked, j, limit);
         const continues =
+          // Nothing has been consumed yet, so the construct has not started:
+          // `fun f(): T =` with the body on the following line.
+          before === '' ||
           before === ',' || before === '.' || before === ':' || before === '&' || before === '|' || before === '>' ||
+          before === '=' || before === '(' || before === '{' ||
           after === ',' || after === '.' || after === '?' || after === '&' || after === '|';
         if (!continues) {
           break;

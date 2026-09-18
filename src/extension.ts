@@ -15,6 +15,7 @@ import { KotlinReferenceProvider } from './providers/referenceProvider';
 import { KotlinDocumentSymbolProvider, KotlinWorkspaceSymbolProvider } from './providers/symbolProviders';
 import { KotlinHoverProvider } from './providers/hoverProvider';
 import { XmlDefinitionProvider } from './providers/xmlProvider';
+import { KotlinSemanticTokensProvider, SEMANTIC_LEGEND } from './providers/semanticTokensProvider';
 import { LibraryContentProvider } from './providers/libraryContentProvider';
 import { fileKeyForUri } from './providers/uriMapping';
 import { log, logError, setLogSink, setTrace } from './util/log';
@@ -48,6 +49,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const providerSettings = () => ({ maxResults: config.maxResults, androidResources: config.androidResources });
   const enabled = () => config.enable;
+  const semanticTokens = new KotlinSemanticTokensProvider(
+    documents,
+    resolver,
+    service,
+    () => config.enable && config.semanticHighlighting,
+  );
 
   // Library sources are served straight out of their jars as read-only docs.
   context.subscriptions.push(
@@ -84,6 +91,10 @@ export function activate(context: vscode.ExtensionContext): void {
       XML_SELECTOR,
       new XmlDefinitionProvider(android, () => config.enable && config.androidResources),
     ),
+    vscode.languages.registerDocumentSemanticTokensProvider(SOURCE_SELECTOR, semanticTokens, SEMANTIC_LEGEND),
+    // The range provider colours the viewport first on a large file, before the
+    // whole-document pass finishes.
+    vscode.languages.registerDocumentRangeSemanticTokensProvider(SOURCE_SELECTOR, semanticTokens, SEMANTIC_LEGEND),
   );
 
   // ---- keeping the index current -----------------------------------------
@@ -98,6 +109,7 @@ export function activate(context: vscode.ExtensionContext): void {
       service.removeFile(key);
       documents.invalidate(key);
       invalidateLineMap(key);
+      semanticTokens.invalidate(uri.toString());
     }),
   );
 
@@ -105,6 +117,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const key = uri.fsPath;
     documents.invalidate(key);
     invalidateLineMap(key);
+    semanticTokens.invalidate(uri.toString());
     try {
       indexer.indexOne(key);
     } catch (error) {
@@ -151,6 +164,7 @@ export function activate(context: vscode.ExtensionContext): void {
           pendingDocuments.delete(key);
           documents.invalidate(key);
           invalidateLineMap(key);
+          semanticTokens.invalidate(event.document.uri.toString());
           try {
             indexer.indexDocument(event.document, key);
           } catch (error) {
