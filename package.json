@@ -1,0 +1,149 @@
+{
+  "name": "kotlin-navigator",
+  "displayName": "Kotlin Navigator",
+  "description": "Fast, reliable Go to Definition / Find References for Kotlin and Android projects in VS Code and Cursor.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "kotlin",
+    "android",
+    "go to definition",
+    "navigation"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "workspaceContains:**/*.kt",
+    "workspaceContains:**/*.kts"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "kotlin",
+        "aliases": [
+          "Kotlin",
+          "kotlin"
+        ],
+        "extensions": [
+          ".kt",
+          ".kts"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "kotlinNavigator.rebuildIndex",
+        "title": "Kotlin Navigator: Rebuild Index",
+        "category": "Kotlin Navigator"
+      },
+      {
+        "command": "kotlinNavigator.showStats",
+        "title": "Kotlin Navigator: Show Index Statistics",
+        "category": "Kotlin Navigator"
+      },
+      {
+        "command": "kotlinNavigator.showOutput",
+        "title": "Kotlin Navigator: Show Log",
+        "category": "Kotlin Navigator"
+      },
+      {
+        "command": "kotlinNavigator.clearLibraryCache",
+        "title": "Kotlin Navigator: Clear Extracted Library Source Cache",
+        "category": "Kotlin Navigator"
+      }
+    ],
+    "configuration": {
+      "title": "Kotlin Navigator",
+      "properties": {
+        "kotlinNavigator.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Kotlin Navigator definition, reference and symbol providers."
+        },
+        "kotlinNavigator.indexLibrarySources": {
+          "type": "boolean",
+          "default": true,
+          "description": "Index -sources.jar files from the Gradle/Maven caches so you can jump into third-party library code."
+        },
+        "kotlinNavigator.indexAndroidSdkSources": {
+          "type": "boolean",
+          "default": true,
+          "description": "Index the Android SDK sources (framework classes such as android.app.Activity)."
+        },
+        "kotlinNavigator.androidSdkPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the Android SDK. Leave empty to auto-detect from ANDROID_HOME, ANDROID_SDK_ROOT or the default location."
+        },
+        "kotlinNavigator.gradleCachePaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra directories to scan for -sources.jar files. Defaults to ~/.gradle/caches and ~/.m2/repository."
+        },
+        "kotlinNavigator.excludeGlobs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/node_modules/**",
+            "**/.git/**",
+            "**/build/intermediates/**",
+            "**/build/tmp/**",
+            "**/build/kotlin/**"
+          ],
+          "description": "Glob patterns excluded from workspace indexing."
+        },
+        "kotlinNavigator.indexGeneratedSources": {
+          "type": "boolean",
+          "default": true,
+          "description": "Index generated sources under build/generated (ViewBinding, DataBinding, SafeArgs, Room, KSP/KAPT output)."
+        },
+        "kotlinNavigator.androidResources": {
+          "type": "boolean",
+          "default": true,
+          "description": "Resolve Android resource references (R.layout.x, R.id.x, binding fields, custom view tags in XML)."
+        },
+        "kotlinNavigator.maxResults": {
+          "type": "number",
+          "default": 12,
+          "description": "Maximum number of definition candidates returned when a reference is ambiguous."
+        },
+        "kotlinNavigator.enableHover": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a hover card with the resolved declaration signature."
+        },
+        "kotlinNavigator.trace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log detailed resolution steps to the Kotlin Navigator output channel."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "typecheck": "tsc --noEmit",
+    "package": "npm run typecheck && npm test && node esbuild.js --production && npx --yes @vscode/vsce package --no-dependencies --allow-missing-repository",
+    "test": "esbuild test/index.ts --bundle --platform=node --alias:vscode=./test/vscodeMock.ts --outfile=out/tests.js --log-level=error && node out/tests.js",
+    "bench": "esbuild tools/bench.ts --bundle --platform=node --outfile=out/bench.js --log-level=error && node --max-old-space-size=8192 out/bench.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  }
+}
